@@ -1,12 +1,10 @@
 # app_streamlit.py
 """
-Visor UVI — visualización afinada
-- Selección tipo de puntos: semáforo / punto sin color / línea / línea+punto
-- Selección agregado: cada valor / promedio diario / máximo diario / mínimo diario
-- Opción para guardar imagen (PNG via kaleido) y HTML interactivo
-- Estilos: 'actual' o 'académico'
-- Climatología: reconstruida filtrando percentiles 1-99 y suavizada con N_smooth (30)
-- Requiere: streamlit, pandas, numpy, plotly, kaleido
+Visor UVI — múltiples variables para puntos y climatologías
+- Selección múltiple de variables para observaciones (points_vars)
+- Selección múltiple de variables para climatologías (clim_vars)
+- Mantiene agregado (cada valor / mean / max / min diario), estilos y exportaciones
+- Depende de prueba.py (df, df_daily_uv, vars_uv, opcionales: N_smooth, semaphore_colors, semaphore_values)
 """
 
 import importlib
@@ -18,11 +16,12 @@ import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.io as pio
+import plotly.colors as plc
 
 MODULE_NAME = "prueba"
 
 # -------------------------
-# Cargar / recargar prueba.py (usar cache_resource para módulos)
+# Load / reload prueba.py safely (module object -> use cache_resource)
 # -------------------------
 @st.cache_resource
 def load_prueba_module():
@@ -40,7 +39,7 @@ def force_reload_prueba():
     return mod
 
 # -------------------------
-# Reconstruir climatología desde df_daily_uv con filtro percentiles 1-99 y suavizado
+# Build climatology (dropna, percentile filter, group by DOY, smooth)
 # -------------------------
 @st.cache_data(show_spinner=False)
 def build_climatology_from_daily(df_daily_uv_in, vars_uv_list, N_smooth=30):
@@ -76,101 +75,11 @@ def build_climatology_from_daily(df_daily_uv_in, vars_uv_list, N_smooth=30):
     return clim
 
 # -------------------------
-# Iniciar app
+# Helpers
 # -------------------------
-st.set_page_config(page_title="Visor UVI — Afinado", layout="wide")
-st.title("Visor UVI — visualización afinada")
-
-# Botón recarga
-reload_col, info_col = st.columns([1, 4])
-with reload_col:
-    if st.button("🔄 Recargar prueba.py (force)"):
-        try:
-            prueba = force_reload_prueba()
-            st.experimental_rerun()
-        except Exception as e:
-            st.error(f"Error recargando: {e}")
-
-with info_col:
-    st.markdown("Usa los controles para definir la visualización: estilo, tipo de puntos, agregado, y exportación.")
-
-# cargar módulo prueba.py
-try:
-    prueba = load_prueba_module()
-except Exception as e:
-    st.error(f"No se pudo importar '{MODULE_NAME}': {e}")
-    st.stop()
-
-# verificar variables obligatorias
-required = ['df', 'df_daily_uv', 'vars_uv']
-missing = [r for r in required if not hasattr(prueba, r)]
-if missing:
-    st.error(f"prueba.py debe contener las variables: {missing}")
-    st.stop()
-
-# obtener objetos
-df = prueba.df.copy()
-df_daily_uv = prueba.df_daily_uv.copy()
-vars_uv = list(prueba.vars_uv)
-N_smooth = getattr(prueba, 'N_smooth', 30)
-semaphore_colors = getattr(prueba, 'semaphore_colors', None)
-semaphore_values = getattr(prueba, 'semaphore_values', None)
-
-# reconstruir climatologia (aplica filtros y suavizado N=30)
-clim_uv = build_climatology_from_daily(df_daily_uv, vars_uv, N_smooth=30)
-
-# -------------------------
-# Interfaz de usuario (controles)
-# -------------------------
-min_date = df['Datetime'].min().date()
-max_date = df['Datetime'].max().date()
-default_start = min_date
-default_end = min(min_date + timedelta(days=30), max_date)
-
-left, right = st.columns([3, 1])
-with left:
-    date_range = st.date_input("Rango de fechas", value=(default_start, default_end),
-                               min_value=min_date, max_value=max_date)
-    if isinstance(date_range, tuple):
-        date_start, date_end = date_range
-    else:
-        date_start = date_range
-        date_end = date_range
-
-    points_var = st.selectbox("Variable para puntos (observaciones)", vars_uv, index=0)
-    clim_var = st.selectbox("Variable de la climatología (media suavizada, N=30)", vars_uv, index=0)
-
-    # nuevo: agregado (cada valor / mean / max / min diario)
-    agg_choice = st.selectbox("Mostrar puntos como:", ['cada valor', 'promedio diario', 'máximo diario', 'mínimo diario'])
-
-    # nuevo: tipo de punto / line style
-    point_style = st.selectbox("Tipo de marcador/linea:",
-                               ['semaphore (coloreado por índice)', 'punto simple', 'línea', 'línea + punto'])
-
-    # nuevo: estilo de figura
-    style_choice = st.selectbox("Estilo de visualización:", ['Estilo actual', 'Estilo académico'])
-
-    # mostrar elementos
-    show_points = st.checkbox("Mostrar puntos/serie (según agregado)", value=True)
-    show_clim_mean = st.checkbox("Mostrar media suavizada de la climatología", value=True)
-    show_clim_band = st.checkbox("Mostrar banda ±2σ (std suavizada)", value=True)
-
-with right:
-    st.markdown("**Exportar / Descargas**")
-    st.write(f"N_smooth (climatología) = **{N_smooth}**")
-    st.write(f"Fechas overpass disponibles: {min_date} → {max_date}")
-
-# -------------------------
-# Preparar datos a plotear según agregado
-# -------------------------
-fecha_inicio = pd.to_datetime(date_start)
-fecha_fin = pd.to_datetime(date_end) + pd.Timedelta(hours=23, minutes=59, seconds=59)
-fechas = pd.date_range(fecha_inicio.date(), fecha_fin.date(), freq='D')
-
 def doy_to_index(doy):
     return 365 if doy == 366 else int(doy)
 
-# construir serie climatologia (mean_smooth) y sigma (std_smooth)
 def build_clim_series_for_dates(clim_df, fechas, var):
     out = []
     for d in fechas.dayofyear:
@@ -195,112 +104,188 @@ def build_clim_std_for_dates(clim_df, fechas, var):
             out.append(clim_df.at[doy, col2] if col2 in clim_df.columns and doy in clim_df.index else np.nan)
     return np.array(out, dtype=float)
 
-# -------------------------
-# Helpers de color / mapeo
-# -------------------------
-def map_color_vals(vals, semaphore_colors=semaphore_colors, semaphore_values=semaphore_values):
+def map_color_vals(vals, semaphore_colors=None, semaphore_values=None):
     """
-    Mapear una lista/array de valores numéricos a colores.
-    - Si existe semaphore_colors y semaphore_values se usa esa mapping (espera índices enteros).
-    - Sino, usa una paleta de fallback.
-    Devuelve una lista de hex colors con la misma longitud que vals.
+    Map numeric values to hex colors. If semaphore mapping is provided, use it.
+    Otherwise use a fallback qualitative palette repeated/clipped.
     """
     cols = []
-    # fallback palette (long enough)
-    fallback = ['#2D6A4F', '#52B788', '#A7C957', '#FFD166', '#EF476F', '#9D4EDD', '#1f77b4', '#ff7f0e']
-
+    fallback = plc.qualitative.Plotly
     for v in vals:
         try:
             if pd.isna(v):
-                cols.append('#999999')
-                continue
+                cols.append('#999999'); continue
         except Exception:
-            cols.append('#999999')
-            continue
-
-        # intentar usar semaphore mapping si está definido correctamente
-        try:
-            if semaphore_colors is not None and semaphore_values is not None:
-                # redondear el valor a entero y mapear respecto al rango de semaphore_values
+            cols.append('#999999'); continue
+        if semaphore_colors is not None and semaphore_values is not None:
+            try:
                 idx = int(np.rint(v))
                 minv = min(semaphore_values)
                 pos = idx - minv
-                pos = int(np.clip(pos, 0, len(semaphore_colors) - 1))
+                pos = int(np.clip(pos, 0, len(semaphore_colors)-1))
                 cols.append(semaphore_colors[pos])
                 continue
-        except Exception:
-            pass
-
-        # fallback simple: truncar a entero y elegir de fallback
+            except Exception:
+                pass
+        # fallback: map integer part to fallback palette
         try:
-            ii = int(np.clip(int(np.floor(v if not pd.isna(v) else 0)), 0, len(fallback) - 1))
+            ii = int(np.clip(int(np.floor(v if not pd.isna(v) else 0)), 0, len(fallback)-1))
         except Exception:
             ii = 0
         cols.append(fallback[ii])
-
     return cols
 
-# preparar los puntos según agg_choice
-mask = (df['Datetime'] >= fecha_inicio) & (df['Datetime'] <= fecha_fin)
-df_range = df.loc[mask].copy()
+# -------------------------
+# Start app
+# -------------------------
+st.set_page_config(page_title="Visor UVI — Multi-variable", layout="wide")
+st.title("Visor UVI — múltiples variables para puntos y climatologías")
 
-if agg_choice == 'cada valor':
-    # cada overpass se usa tal cual
-    plot_df = df_range.copy()
-    plot_df['PlotDate'] = plot_df['Datetime'].dt.floor('D')  # keep full datetime for x, but also store day
-    plot_x = plot_df['Datetime']
-    plot_y = plot_df[points_var]
-    # customdata similar a antes
-    customdata = np.stack([
-        plot_df.get('SZA', pd.Series(np.nan, index=plot_df.index)).fillna(np.nan).values,
-        plot_df.get('SZA_noon_local', pd.Series(np.nan, index=plot_df.index)).fillna(np.nan).values,
-        # mu and mu+2sigma from selected climatology for the DOY of each overpass
-        [ (clim_uv.at[doy_to_index(int(d)), f"{clim_var}_mean_smooth"] if (f"{clim_var}_mean_smooth" in clim_uv.columns and doy_to_index(int(d)) in clim_uv.index) else (clim_uv.at[doy_to_index(int(d)), f"{clim_var}_mean"] if f"{clim_var}_mean" in clim_uv.columns and doy_to_index(int(d)) in clim_uv.index else np.nan))
-          if not pd.isna(d) else np.nan for d in plot_df['DOY']],
-        [ ( (clim_uv.at[doy_to_index(int(d)), f"{clim_var}_mean_smooth"] if (f"{clim_var}_mean_smooth" in clim_uv.columns and doy_to_index(int(d)) in clim_uv.index) else (clim_uv.at[doy_to_index(int(d)), f"{clim_var}_mean"] if f"{clim_var}_mean" in clim_uv.columns and doy_to_index(int(d)) in clim_uv.index else np.nan)) + 
-            2*(clim_uv.at[doy_to_index(int(d)), f"{clim_var}_std_smooth"] if (f"{clim_var}_std_smooth" in clim_uv.columns and doy_to_index(int(d)) in clim_uv.index) else (clim_uv.at[doy_to_index(int(d)), f"{clim_var}_std"] if f"{clim_var}_std" in clim_uv.columns and doy_to_index(int(d)) in clim_uv.index else np.nan))
-          ) if not pd.isna(d) else np.nan for d in plot_df['DOY']]
-    ], axis=1)
+# reload button
+reload_col, info_col = st.columns([1,4])
+with reload_col:
+    if st.button("🔄 Recargar prueba.py (force)"):
+        try:
+            prueba = force_reload_prueba()
+            st.experimental_rerun()
+        except Exception as e:
+            st.error(f"Error recargando: {e}")
 
-    # colors
-    def map_color_vals(vals):
-        cols = []
-        for v in vals:
-            try:
-                if np.isnan(v):
-                    cols.append('#999999'); continue
-            except:
-                cols.append('#999999'); continue
-            if semaphore_colors is not None and semaphore_values is not None:
-                try:
-                    idx = int(np.rint(v))
-                    minv = min(semaphore_values)
-                    pos = idx - minv
-                    pos = int(np.clip(pos, 0, len(semaphore_colors)-1))
-                    cols.append(semaphore_colors[pos]); continue
-                except:
-                    pass
-            # fallback palette
-            palette = ['#2D6A4F','#52B788','#A7C957','#FFD166','#EF476F','#9D4EDD']
-            try:
-                ii = int(np.clip(int(np.floor(v if not pd.isna(v) else 0)), 0, len(palette)-1))
-            except:
-                ii = 0
-            cols.append(palette[ii])
-        return cols
+with info_col:
+    st.markdown("Seleccioná una o más variables para las observaciones y/o para la climatología. Cada variable se graficará con su propia traza.")
 
-    plot_colors = map_color_vals(plot_y.fillna(0).values)
+# load module
+try:
+    prueba = load_prueba_module()
+except Exception as e:
+    st.error(f"No se pudo importar '{MODULE_NAME}': {e}")
+    st.stop()
 
-else:
-    # Resample diario y agregar (mean/max/min)
-    if df_range.empty:
-        plot_df = pd.DataFrame(columns=['Datetime', points_var])
-        plot_x = pd.Series(pd.to_datetime([]))
-        plot_y = pd.Series(dtype=float)
-        plot_colors = []
-        customdata = np.empty((0,4))
+# required objects
+required = ['df', 'df_daily_uv', 'vars_uv']
+missing = [r for r in required if not hasattr(prueba, r)]
+if missing:
+    st.error(f"prueba.py debe contener las variables: {missing}")
+    st.stop()
+
+# get objects
+df = prueba.df.copy()
+df_daily_uv = prueba.df_daily_uv.copy()
+vars_uv = list(prueba.vars_uv)
+N_smooth = getattr(prueba, 'N_smooth', 30)
+semaphore_colors = getattr(prueba, 'semaphore_colors', None)
+semaphore_values = getattr(prueba, 'semaphore_values', None)
+
+# build climatology
+clim_uv = build_climatology_from_daily(df_daily_uv, vars_uv, N_smooth=N_smooth if N_smooth is not None else 30)
+
+# UI controls
+min_date = df['Datetime'].min().date()
+max_date = df['Datetime'].max().date()
+default_start = min_date
+default_end = min(min_date + timedelta(days=30), max_date)
+
+left, right = st.columns([3,1])
+with left:
+    date_range = st.date_input("Rango de fechas", value=(default_start, default_end),
+                               min_value=min_date, max_value=max_date)
+    if isinstance(date_range, tuple):
+        date_start, date_end = date_range
     else:
-        tmp = df_range.set_index('Datetime')[points_var].resample('D')
+        date_start = date_range
+        date_end = date_range
+
+    # MULTISELECTS
+    points_vars = st.multiselect("Variables para puntos (observaciones) — puede elegir varias", vars_uv, default=[vars_uv[0]])
+    clim_vars = st.multiselect("Variables para climatología (media suavizada) — puede elegir varias", vars_uv, default=[vars_uv[0]])
+
+    agg_choice = st.selectbox("Mostrar puntos como:", ['cada valor', 'promedio diario', 'máximo diario', 'mínimo diario'])
+    point_style = st.selectbox("Tipo de marcador/linea:", ['semaphore (coloreado por índice)', 'punto simple', 'línea', 'línea + punto'])
+    style_choice = st.selectbox("Estilo de visualización:", ['Estilo actual', 'Estilo académico'])
+
+    show_points = st.checkbox("Mostrar observaciones/series", value=True)
+    show_clim_mean = st.checkbox("Mostrar media suavizada de la(s) climatología(es)", value=True)
+    show_clim_band = st.checkbox("Mostrar banda ±2σ para las climatologías", value=True)
+
+with right:
+    st.markdown("**Export / Info**")
+    st.write(f"N_smooth (climatología) = **{N_smooth}**")
+    st.write(f"Fechas overpass: {min_date} → {max_date}")
+    st.download_button("Descargar overpass procesado (CSV)", df.to_csv(index=False), file_name="overpass_processed.csv")
+
+# prepare date range
+fecha_inicio = pd.to_datetime(date_start)
+fecha_fin = pd.to_datetime(date_end) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+fechas = pd.date_range(fecha_inicio.date(), fecha_fin.date(), freq='D')
+
+# prepare figure
+fig = go.Figure()
+
+# styling params
+if style_choice == 'Estilo académico':
+    template = 'plotly_white'
+    font_family = "Times New Roman, Times, serif"
+    title_font_size = 18
+    axis_title_font_size = 14
+    line_width_clim = 2.5
+    marker_size = 8
+else:
+    template = None
+    font_family = "Arial, sans-serif"
+    title_font_size = 14
+    axis_title_font_size = 12
+    line_width_clim = 2
+    marker_size = 9
+
+# plot climatologies (multiple)
+color_cycle = plc.qualitative.Plotly
+if show_clim_mean and clim_vars:
+    for i, cv in enumerate(clim_vars):
+        color = color_cycle[i % len(color_cycle)]
+        y_clim = build_clim_series_for_dates(clim_uv, fechas, cv)
+        fig.add_trace(go.Scatter(x=fechas, y=y_clim, mode='lines',
+                                 name=f'Clim: {cv}', line=dict(color=color, width=line_width_clim),
+                                 hovertemplate="Fecha: %{x}<br>Climatología: %{y:.3f}<extra></extra>"))
+        # band
+        if show_clim_band:
+            sigma = build_clim_std_for_dates(clim_uv, fechas, cv)
+            upper = y_clim + 2*sigma
+            lower = y_clim - 2*sigma
+            fig.add_trace(go.Scatter(x=fechas, y=upper, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+            fig.add_trace(go.Scatter(x=fechas, y=lower, mode='lines', fill='tonexty',
+                                     fillcolor='rgba(200,200,200,0.15)', line=dict(width=0),
+                                     name=f'Banda ±2σ {cv}', hoverinfo='skip'))
+
+# Helper to get per-variable series for plotting (handles agg_choice)
+def get_series_for_var(var):
+    mask = (df['Datetime'] >= fecha_inicio) & (df['Datetime'] <= fecha_fin)
+    df_range = df.loc[mask].copy()
+    if agg_choice == 'cada valor':
+        x = df_range['Datetime']
+        y = df_range[var]
+        # customdata: SZA, SZA_noon_local, mu, mu+2sigma (mu from climatology for DOY of each observation)
+        mu_vals = []
+        mu2_vals = []
+        for doy in df_range['DOY']:
+            if pd.isna(doy):
+                mu_vals.append(np.nan); mu2_vals.append(np.nan); continue
+            d = doy_to_index(int(doy))
+            mean_col = f"{var}_mean_smooth" if (f"{var}_mean_smooth" in clim_uv.columns) else f"{var}_mean"
+            std_col = f"{var}_std_smooth" if (f"{var}_std_smooth" in clim_uv.columns) else f"{var}_std"
+            mu = clim_uv.at[d, mean_col] if (mean_col in clim_uv.columns and d in clim_uv.index) else np.nan
+            sigma = clim_uv.at[d, std_col] if (std_col in clim_uv.columns and d in clim_uv.index) else np.nan
+            mu_vals.append(mu)
+            mu2_vals.append(mu + 2*sigma if (not pd.isna(mu) and not pd.isna(sigma)) else np.nan)
+        custom = np.stack([
+            df_range.get('SZA', pd.Series(np.nan, index=df_range.index)).fillna(np.nan).values,
+            df_range.get('SZA_noon_local', pd.Series(np.nan, index=df_range.index)).fillna(np.nan).values,
+            np.array(mu_vals, dtype=float),
+            np.array(mu2_vals, dtype=float)
+        ], axis=1)
+        return x, y, custom
+    else:
+        # daily aggregate
+        tmp = df_range.set_index('Datetime')[var].resample('D')
         if agg_choice == 'promedio diario':
             s = tmp.mean()
         elif agg_choice == 'máximo diario':
@@ -309,183 +294,147 @@ else:
             s = tmp.min()
         else:
             s = tmp.mean()
-
-        # s is a Series indexed by date
-        plot_x = s.index
-        plot_y = s.values
-
-        # calculamos mu (climatología) y mu+2sigma para cada fecha en plot_x (serie diaria agregada)
+        x = s.index
+        y = s.values
+        # compute mu/mu2 per day
         mu_list = []
         mu2_list = []
-
-        for d in plot_x:
-            # asegurar que trabajamos con un Timestamp
+        for d in x:
             ts = pd.Timestamp(d)
             doy = doy_to_index(ts.dayofyear)
-
-            # default
-            mu = np.nan
-            sigma = np.nan
-
-            # sólo intentar leer si el DOY existe en clim_uv
+            mu = np.nan; sigma = np.nan
             if doy in clim_uv.index:
-                mean_s_col = f"{clim_var}_mean_smooth"
-                mean_col = f"{clim_var}_mean"
-                std_s_col = f"{clim_var}_std_smooth"
-                std_col = f"{clim_var}_std"
-
+                mean_s_col = f"{var}_mean_smooth"
+                mean_col = f"{var}_mean"
+                std_s_col = f"{var}_std_smooth"
+                std_col = f"{var}_std"
                 if mean_s_col in clim_uv.columns:
                     mu = clim_uv.at[doy, mean_s_col]
                 elif mean_col in clim_uv.columns:
                     mu = clim_uv.at[doy, mean_col]
-
                 if std_s_col in clim_uv.columns:
                     sigma = clim_uv.at[doy, std_s_col]
                 elif std_col in clim_uv.columns:
                     sigma = clim_uv.at[doy, std_col]
-
             mu_list.append(mu)
             mu2_list.append(mu + 2*sigma if (not pd.isna(mu) and not pd.isna(sigma)) else np.nan)
-
-        # customdata: SZA, SZA_noon_local (NaN para agregados diarios), mu, mu+2sigma
-        customdata = np.stack([
-            np.full(len(plot_x), np.nan),                      # SZA (no disponible al agregar diario)
-            np.full(len(plot_x), np.nan),                      # SZA_noon_local (no disponible)
+        custom = np.stack([
+            np.full(len(x), np.nan),
+            np.full(len(x), np.nan),
             np.array(mu_list, dtype=float),
             np.array(mu2_list, dtype=float)
         ], axis=1)
+        return x, y, custom
 
-        # map colors sobre plot_y (serie agregada)
-        plot_colors = map_color_vals(plot_y)
+# Plot points / series for each selected variable
+if show_points and points_vars:
+    for j, pv in enumerate(points_vars):
+        x, y, custom = get_series_for_var(pv)
+        # determine mode and colors
+        if point_style == 'semaphore (coloreado por índice)':
+            mode = 'markers' if agg_choice == 'cada valor' else 'lines+markers'
+            marker_colors = map_color_vals(y, semaphore_colors=semaphore_colors, semaphore_values=semaphore_values)
+            line_color = None
+        elif point_style == 'punto simple':
+            mode = 'markers'
+            marker_colors = None
+            line_color = '#1f77b4'
+        elif point_style == 'línea':
+            mode = 'lines'
+            marker_colors = None
+            line_color = plc.qualitative.Plotly[j % len(plc.qualitative.Plotly)]
+        else:  # 'línea + punto'
+            mode = 'lines+markers'
+            marker_colors = None
+            line_color = plc.qualitative.Plotly[j % len(plc.qualitative.Plotly)]
 
+        # Add trace (per variable)
+        fig.add_trace(go.Scatter(
+            x=x, y=y,
+            mode=mode,
+            name=f'{pv} ({agg_choice})',
+            marker=dict(size=marker_size, color=marker_colors, line=dict(width=0.4, color='black') if marker_colors is not None else dict(width=0)),
+            line=dict(width=2, color=line_color),
+            customdata=custom,
+            hovertemplate=(
+                "Fecha: %{x}<br>"
+                f"{pv}: "+"%{y:.3f}<br>"
+                "SZA_overpass: %{customdata[0]:.2f}<br>"
+                "SZA_noon_local: %{customdata[1]:.2f}<br>"
+                "mu: %{customdata[2]:.3f}<br>"
+                "mu+2σ: %{customdata[3]:.3f}<extra></extra>"
+            )
+        ))
 
-# -------------------------
-# Construir figura Plotly con estilo elegido
-# -------------------------
-fig = go.Figure()
-
-# styles
-if style_choice == 'Estilo académico':
-    template = 'plotly_white'
-    font_family = "Times New Roman, Times, serif"
-    title_font_size = 20
-    axis_title_font_size = 14
-    line_width_clim = 2.5
-    marker_size = 8
-else:
-    template = None
-    font_family = "Arial, sans-serif"
-    title_font_size = 16
-    axis_title_font_size = 12
-    line_width_clim = 2
-    marker_size = 9
-
-# climatologia trace
-if show_clim_mean:
-    y_clim = build_clim_series_for_dates(clim_uv, fechas, clim_var)
-    fig.add_trace(go.Scatter(x=fechas, y=y_clim, mode='lines',
-                             name=f'Climatología (mean_smooth) — {clim_var}',
-                             line=dict(color='gray', width=line_width_clim),
-                             hovertemplate="Fecha: %{x}<br>Climatología: %{y:.3f}<extra></extra>"))
-
-# banda ±2σ
-if show_clim_band:
-    mu = build_clim_series_for_dates(clim_uv, fechas, clim_var)
-    sigma = build_clim_std_for_dates(clim_uv, fechas, clim_var)
-    upper = mu + 2 * sigma
-    lower = mu - 2 * sigma
-    fig.add_trace(go.Scatter(x=fechas, y=upper, mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
-    fig.add_trace(go.Scatter(x=fechas, y=lower, mode='lines', fill='tonexty',
-                             fillcolor='rgba(200,200,200,0.25)', line=dict(width=0),
-                             name='Banda ±2σ', hoverinfo='skip'))
-
-# puntos/linea según elección
-if show_points:
-    # determine mode
-    if point_style == 'semaphore (coloreado por índice)':
-        mode = 'markers'
-        marker_colors = plot_colors
-        line_mode = None
-        if agg_choice in ['cada valor'] and 'línea' in point_style:
-            pass
-    elif point_style == 'punto simple':
-        mode = 'markers'
-        marker_colors = ['#1f77b4'] * len(plot_colors) if len(plot_colors)>0 else None
-    elif point_style == 'línea':
-        mode = 'lines'
-        marker_colors = None
-    else:  # 'línea + punto'
-        mode = 'lines+markers'
-        marker_colors = plot_colors if point_style.startswith('semaphore') else (['#1f77b4'] * len(plot_colors) if len(plot_colors)>0 else None)
-
-    # add trace
-    fig.add_trace(go.Scatter(
-        x=plot_x, y=plot_y,
-        mode=mode,
-        name=f'{points_var} ({agg_choice})',
-        marker=dict(size=marker_size, color=marker_colors, line=dict(width=0.5, color='black')),
-        line=dict(width=2),
-        hovertemplate=(
-            "Fecha: %{x}<br>"
-            f"{points_var}: "+"%{y:.3f}<br>"
-            "SZA_overpass: %{customdata[0]:.2f}<br>"
-            "SZA_noon_local: %{customdata[1]:.2f}<br>"
-            f"mu({clim_var}): "+"%{customdata[2]:.3f}<br>"
-            f"mu+2σ({clim_var}): "+"%{customdata[3]:.3f}<extra></extra>"
-        ),
-        customdata=customdata if 'customdata' in locals() else None
-    ))
-
-# layout adjustments
+# Layout
 fig.update_layout(
     template=template,
     font=dict(family=font_family, size=12),
-    title=dict(text=f"Climatología: {clim_var} (N={N_smooth}) — Observaciones: {points_var} ({agg_choice})", x=0.01, xanchor='left', font=dict(size=title_font_size)),
+    title=dict(text=f"Climatologías: {', '.join(clim_vars)} — Observaciones: {', '.join(points_vars)}", x=0.01, xanchor='left', font=dict(size=title_font_size)),
     xaxis_title="Fecha",
     yaxis_title="Índice UV",
     hovermode="closest",
-    height=650
+    height=700
 )
 
-# eje Y estilo académico
 if style_choice == 'Estilo académico':
     fig.update_yaxes(tickfont=dict(size=12), title_font=dict(size=axis_title_font_size), gridcolor='lightgray', zeroline=True)
     fig.update_xaxes(tickfont=dict(size=11), title_font=dict(size=axis_title_font_size), gridcolor='lightgray')
 
-# mostrar figura
 st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------
-# Export / Download buttons
+# Export / download: combined CSV, HTML, PNG
 # -------------------------
-col_png, col_html, col_csv = st.columns([1,1,1])
-with col_png:
-    st.write("Guardar imagen (PNG):")
+# Build CSV with combined data for selected variables
+def build_combined_csv(points_vars, agg_choice, fecha_inicio, fecha_fin):
+    mask = (df['Datetime'] >= fecha_inicio) & (df['Datetime'] <= fecha_fin)
+    df_range = df.loc[mask].copy()
+    if not points_vars:
+        return pd.DataFrame()
+    if agg_choice == 'cada valor':
+        out = df_range[['Datetime','DOY'] + points_vars].copy()
+        return out.sort_values('Datetime').reset_index(drop=True)
+    else:
+        resampled = []
+        for pv in points_vars:
+            tmp = df_range.set_index('Datetime')[pv].resample('D')
+            if agg_choice == 'promedio diario':
+                s = tmp.mean()
+            elif agg_choice == 'máximo diario':
+                s = tmp.max()
+            elif agg_choice == 'mínimo diario':
+                s = tmp.min()
+            else:
+                s = tmp.mean()
+            s = s.rename(pv).reset_index()
+            resampled.append(s)
+        # merge on Datetime
+        dfm = resampled[0]
+        for dfp in resampled[1:]:
+            dfm = dfm.merge(dfp, on='Datetime', how='outer')
+        return dfm.sort_values('Datetime').reset_index(drop=True)
+
+col1, col2, col3 = st.columns([1,1,1])
+with col1:
+    csv_df = build_combined_csv(points_vars, agg_choice, fecha_inicio, fecha_fin)
+    st.download_button("Descargar datos (CSV)", data=csv_df.to_csv(index=False), file_name="uvi_plot_data.csv", mime="text/csv")
+with col2:
+    html = pio.to_html(fig, full_html=False, include_plotlyjs='cdn')
+    st.download_button("Descargar HTML interactivo", data=html, file_name="uvi_plot.html", mime="text/html")
+with col3:
     try:
-        # usar kaleido para render PNG
         img_bytes = pio.to_image(fig, format='png', engine='kaleido')
         st.download_button("Descargar PNG", data=img_bytes, file_name="uvi_plot.png", mime="image/png")
     except Exception as e:
-        st.warning("Exportar PNG requiere 'kaleido' en requirements. Si está instalado y falla, revisá: " + str(e))
+        st.warning("Exportar PNG requiere 'kaleido' y un Chrome/Chromium disponible. Si falla, usá la descarga HTML. Detalle: " + str(e))
 
-with col_html:
-    html = pio.to_html(fig, full_html=False, include_plotlyjs='cdn')
-    st.download_button("Descargar HTML interactivo", data=html, file_name="uvi_plot.html", mime="text/html")
-
-with col_csv:
-    # generar CSV de los datos mostrados (plot)
-    if agg_choice == 'cada valor':
-        csv_df = plot_df[['Datetime', points_var]].copy()
-        csv_df = csv_df.rename(columns={points_var: 'value'}).sort_values('Datetime')
-    else:
-        csv_df = pd.DataFrame({'Datetime': plot_x, 'value': plot_y})
-    st.download_button("Descargar datos (CSV)", data=csv_df.to_csv(index=False), file_name="uvi_plot_data.csv", mime="text/csv")
-
-# tabla de observaciones (rango)
+# Table of observations (range)
 st.markdown("### Tabla: observaciones (rango seleccionado)")
-display_cols = ['Datetime', 'DOY', 'SZA']
+display_cols = ['Datetime', 'DOY', 'SZA'] + [v for v in points_vars if v in df.columns]
 if 'SZA_noon_local' in df.columns:
-    display_cols.append('SZA_noon_local')
-if points_var in df.columns:
-    display_cols.append(points_var)
-st.dataframe(df.loc[(df['Datetime'] >= fecha_inicio) & (df['Datetime'] <= fecha_fin)][display_cols].sort_values('Datetime').reset_index(drop=True))
+    display_cols.insert(3, 'SZA_noon_local')
+if not display_cols:
+    st.write("No hay columnas seleccionadas para mostrar.")
+else:
+    st.dataframe(df.loc[(df['Datetime'] >= fecha_inicio) & (df['Datetime'] <= fecha_fin)][display_cols].sort_values('Datetime').reset_index(drop=True))
